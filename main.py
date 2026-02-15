@@ -6,8 +6,10 @@ from aiogram.filters import Command
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
     ReplyKeyboardMarkup,
-    KeyboardButton
+    KeyboardButton,
 )
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
@@ -111,6 +113,7 @@ async def start(message: types.Message):
         "📋 <b>Поточний список</b> — показує всі товари, які ти додав(ла) і ще не купив(ла).\n\n"
         "✅ <b>Список виконано</b> — очищає список після того, як ти все купив(ла).\n\n"
         "🔍 <b>Пошук товарів</b> — введи слово або літери, і я покажу збережені товари, що підходять; можна додати їх у список одним натисканням.\n\n"
+        "💬 Ще можна написати <b>@ім'я_бота</b> і літери — зʼявляться підказки без відправки повідомлення; якщо такого товару немає, зʼявиться «Додати?» — обереш і продовжиш.\n\n"
         "Команда /help — коротка підказка по кнопках.",
         parse_mode="HTML",
         reply_markup=main_keyboard
@@ -124,7 +127,8 @@ async def help_cmd(message: types.Message):
         "➕ <b>Додати товар</b> — ввести назви товарів (можна кілька підряд).\n"
         "📋 <b>Поточний список</b> — переглянути список покупок.\n"
         "✅ <b>Список виконано</b> — очистити список після покупок.\n"
-        "🔍 <b>Пошук товарів</b> — пошук серед збережених товарів за словом або літерами; додати в список одним натисканням.",
+        "🔍 <b>Пошук товарів</b> — пошук серед збережених товарів за словом або літерами; додати в список одним натисканням.\n"
+        "💬 <b>Inline</b> — напиши @бота і літери в будь-якому чаті — підказки зʼявляться одразу; якщо товару немає — зʼявиться «Додати?».",
         parse_mode="HTML"
     )
 
@@ -173,25 +177,14 @@ async def add_product(message: types.Message, state: FSMContext):
         await message.answer("ℹ️ Цей товар вже є у поточному списку.")
         return
 
-    is_new_product = product not in all_products
     shopping_lists.setdefault(user_id, []).append(product)
     all_products.add(product)
     save_data(shopping_lists, all_products)
 
     await clear_previous_done_keyboard(state, bot)
-    if is_new_product:
-        text = (
-            f"📦 Такого товару ще немає в базі. Можливо, ти хочеш його додати?\n\n"
-            f"✅ Додаю «{product}» до списку.\n"
-            "Можеш продовжувати. Коли закінчиш — натисни «Готово» внизу."
-        )
-    else:
-        text = (
-            f"✅ «{product}» додано.\n"
-            "Можеш продовжувати. Коли закінчиш — натисни «Готово» внизу."
-        )
     sent = await message.answer(
-        text,
+        f"✅ «{product}» додано.\n"
+        "Можеш продовжувати. Коли закінчиш — натисни «Готово» внизу.",
         reply_markup=done_inline_keyboard()
     )
     await state.update_data(
@@ -209,6 +202,73 @@ async def done(callback: types.CallbackQuery, state: FSMContext):
     else:
         await callback.message.edit_text("👌 Режим додавання завершено")
     await callback.answer()
+
+
+# ---------- Inline Mode (пиши @бота + літери — підказки без відправки) ----------
+def _inline_id(prefix: str, text: str) -> str:
+    return prefix + truncate_for_callback(text, prefix)
+
+
+@dp.inline_query()
+async def inline_search(inline_query: types.InlineQuery):
+    q = (inline_query.query or "").strip().lower()
+    results = []
+
+    if q:
+        matches = sorted(p for p in all_products if q in p)[:15]
+        for p in matches:
+            results.append(
+                InlineQueryResultArticle(
+                    id=_inline_id("p:", p),
+                    title=p,
+                    input_message_content=InputTextMessageContent(
+                        message_text=f"✅ Додано до списку: {p}"
+                    ),
+                )
+            )
+        if not matches:
+            # Такого товару немає — пропонуємо додати
+            results.append(
+                InlineQueryResultArticle(
+                    id=_inline_id("n:", q),
+                    title=f"➕ Такого товару немає. Додати «{q}»?",
+                    input_message_content=InputTextMessageContent(
+                        message_text=f"✅ Додано новий товар: {q}"
+                    ),
+                )
+            )
+    else:
+        # Порожній запит — показати кілька останніх/популярних або підказку
+        for p in sorted(all_products)[:10]:
+            results.append(
+                InlineQueryResultArticle(
+                    id=_inline_id("p:", p),
+                    title=p,
+                    input_message_content=InputTextMessageContent(
+                        message_text=f"✅ Додано до списку: {p}"
+                    ),
+                )
+
+    await inline_query.answer(results, cache_time=10)
+
+
+@dp.chosen_inline_result()
+async def chosen_inline(chosen: types.ChosenInlineResult):
+    user_id = chosen.from_user.id
+    rid = chosen.result_id
+
+    if rid.startswith("p:"):
+        product = rid[2:]
+    elif rid.startswith("n:"):
+        product = rid[2:]
+        all_products.add(product)
+    else:
+        return
+
+    if product_in_current_list(user_id, product):
+        return
+    shopping_lists.setdefault(user_id, []).append(product)
+    save_data(shopping_lists, all_products)
 
 
 # ---------- Пошук товарів ----------
