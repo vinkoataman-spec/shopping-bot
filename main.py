@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from difflib import get_close_matches
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -32,6 +31,10 @@ class AddProduct(StatesGroup):
     waiting_for_product = State()
 
 
+class SearchingProducts(StatesGroup):
+    waiting_query = State()
+
+
 # ---------- Bot ----------
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -46,7 +49,8 @@ main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="➕ Додати товар")],
         [KeyboardButton(text="📋 Поточний список")],
-        [KeyboardButton(text="✅ Список виконано")]
+        [KeyboardButton(text="✅ Список виконано")],
+        [KeyboardButton(text="🔍 Пошук товарів")],
     ],
     resize_keyboard=True
 )
@@ -77,31 +81,18 @@ async def clear_previous_done_keyboard(state: FSMContext, bot: Bot):
         pass
 
 
-def similar_products_keyboard(similar, product):
-    prefix_similar = "add_similar:"
-    keyboard = [
+def search_results_keyboard(matches: list):
+    """Інлайн-клавіатура: кнопки «Додати» для кожного товару + Готово."""
+    prefix = "add_from_search:"
+    rows = [
         [InlineKeyboardButton(
-            text=f"➕ Додати «{p}»",
-            callback_data=prefix_similar + truncate_for_callback(p, prefix_similar)
+            text=f"➕ {p}",
+            callback_data=prefix + truncate_for_callback(p, prefix)
         )]
-        for p in similar
+        for p in matches
     ]
-
-    keyboard.append([
-        InlineKeyboardButton(
-            text=f"➕ Все одно додати «{product}»",
-            callback_data="force_add"
-        )
-    ])
-
-    keyboard.append([
-        InlineKeyboardButton(
-            text="❌ Скасувати",
-            callback_data="cancel"
-        )
-    ])
-
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    rows.append([InlineKeyboardButton(text="✅ Готово", callback_data="done")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 # ---------- Helpers ----------
@@ -119,7 +110,7 @@ async def start(message: types.Message):
         "Коли закінчиш, натисни «Готово».\n\n"
         "📋 <b>Поточний список</b> — показує всі товари, які ти додав(ла) і ще не купив(ла).\n\n"
         "✅ <b>Список виконано</b> — очищає список після того, як ти все купив(ла).\n\n"
-        "💡 Якщо назва товару схожа на ту, що ти вже додавав(ла), я запропоную варіанти — можна вибрати з списку або додати свій варіант.\n\n"
+        "🔍 <b>Пошук товарів</b> — введи слово або літери, і я покажу збережені товари, що підходять; можна додати їх у список одним натисканням.\n\n"
         "Команда /help — коротка підказка по кнопках.",
         parse_mode="HTML",
         reply_markup=main_keyboard
@@ -132,8 +123,8 @@ async def help_cmd(message: types.Message):
         "📖 <b>Команди та кнопки</b>\n\n"
         "➕ <b>Додати товар</b> — ввести назви товарів (можна кілька підряд).\n"
         "📋 <b>Поточний список</b> — переглянути список покупок.\n"
-        "✅ <b>Список виконано</b> — очистити список після покупок.\n\n"
-        "Якщо назва схожа на вже відому, бот запропонує варіанти.",
+        "✅ <b>Список виконано</b> — очистити список після покупок.\n"
+        "🔍 <b>Пошук товарів</b> — пошук серед збережених товарів за словом або літерами; додати в список одним натисканням.",
         parse_mode="HTML"
     )
 
@@ -153,7 +144,7 @@ async def start_add(message: types.Message, state: FSMContext):
     )
 
 
-MENU_BUTTONS = ("➕ Додати товар", "📋 Поточний список", "✅ Список виконано")
+MENU_BUTTONS = ("➕ Додати товар", "📋 Поточний список", "✅ Список виконано", "🔍 Пошук товарів")
 
 
 @dp.message(AddProduct.waiting_for_product, lambda m: m.text and m.text in MENU_BUTTONS)
@@ -182,24 +173,25 @@ async def add_product(message: types.Message, state: FSMContext):
         await message.answer("ℹ️ Цей товар вже є у поточному списку.")
         return
 
-    similar = get_close_matches(product, all_products, n=3, cutoff=0.7)
-
-    if similar:
-        await state.update_data(pending_product=product)
-        await message.answer(
-            "🤔 Можливо, ти мав(ла) на увазі:",
-            reply_markup=similar_products_keyboard(similar, product)
-        )
-        return
-
+    is_new_product = product not in all_products
     shopping_lists.setdefault(user_id, []).append(product)
     all_products.add(product)
     save_data(shopping_lists, all_products)
 
     await clear_previous_done_keyboard(state, bot)
+    if is_new_product:
+        text = (
+            f"📦 Такого товару ще немає в базі. Можливо, ти хочеш його додати?\n\n"
+            f"✅ Додаю «{product}» до списку.\n"
+            "Можеш продовжувати. Коли закінчиш — натисни «Готово» внизу."
+        )
+    else:
+        text = (
+            f"✅ «{product}» додано.\n"
+            "Можеш продовжувати. Коли закінчиш — натисни «Готово» внизу."
+        )
     sent = await message.answer(
-        f"✅ «{product}» додано.\n"
-        "Можеш продовжувати. Коли закінчиш — натисни «Готово» внизу.",
+        text,
         reply_markup=done_inline_keyboard()
     )
     await state.update_data(
@@ -208,81 +200,82 @@ async def add_product(message: types.Message, state: FSMContext):
     )
 
 
-@dp.callback_query(lambda c: c.data.startswith("add_similar:"))
-async def add_similar(callback: types.CallbackQuery, state: FSMContext):
+@dp.callback_query(lambda c: c.data == "done")
+async def done(callback: types.CallbackQuery, state: FSMContext):
+    current = await state.get_state()
+    await state.clear()
+    if current and "SearchingProducts" in current:
+        await callback.message.edit_text("👌 Пошук завершено")
+    else:
+        await callback.message.edit_text("👌 Режим додавання завершено")
+    await callback.answer()
+
+
+# ---------- Пошук товарів ----------
+@dp.message(lambda m: m.text == "🔍 Пошук товарів")
+async def start_search(message: types.Message, state: FSMContext):
+    await state.set_state(SearchingProducts.waiting_query)
+    if not all_products:
+        await message.answer(
+            "🔍 Ще немає збережених товарів.\n"
+            "Спочатку додай товари через кнопку «➕ Додати товар» — тоді зʼявиться пошук.",
+            reply_markup=main_keyboard
+        )
+        await state.clear()
+        return
+    await message.answer(
+        "🔍 Введи слово або літери — покажу збережені товари, які підходять.\n"
+        "Можеш додати їх у список одним натисканням. Коли закінчиш — натисни «Готово».",
+        reply_markup=done_inline_keyboard()
+    )
+
+
+@dp.message(SearchingProducts.waiting_query, lambda m: m.text and m.text.strip() in MENU_BUTTONS)
+async def menu_pressed_while_searching(message: types.Message, state: FSMContext):
+    await message.answer(
+        "👀 Ти зараз у режимі пошуку.\n\n"
+        "Натисни кнопку <b>«Готово»</b> внизу, щоб вийти з пошуку.",
+        parse_mode="HTML",
+        reply_markup=done_inline_keyboard()
+    )
+
+
+@dp.message(SearchingProducts.waiting_query)
+async def search_products(message: types.Message, state: FSMContext):
+    query = message.text.strip().lower()
+    if not query:
+        return
+    # Підходящі товари: ті, у назві яких є введений текст
+    matches = sorted(p for p in all_products if query in p)[:15]
+    if not matches:
+        await message.answer(
+            f"По запиту «{query}» нічого не знайдено. Спробуй інші літери або слово.",
+            reply_markup=done_inline_keyboard()
+        )
+        return
+    await message.answer(
+        f"🔍 Знайдено по «{query}»:\nМожеш додати в список одним натисканням.",
+        reply_markup=search_results_keyboard(matches)
+    )
+
+
+@dp.callback_query(lambda c: c.data.startswith("add_from_search:"))
+async def add_from_search(callback: types.CallbackQuery):
     product = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
 
     if product_in_current_list(user_id, product):
-        await callback.message.edit_text(
-            "ℹ️ Цей товар вже є у поточному списку.",
-            reply_markup=done_inline_keyboard()
-        )
-        await callback.answer()
+        await callback.answer("ℹ️ Вже є в списку", show_alert=False)
         return
 
     shopping_lists.setdefault(user_id, []).append(product)
     save_data(shopping_lists, all_products)
 
-    await clear_previous_done_keyboard(state, bot)
     await callback.message.edit_text(
-        f"✅ «{product}» додано.\n"
-        "Можеш продовжувати. Коли закінчиш — натисни «Готово» внизу.",
+        f"✅ «{product}» додано до списку.\n"
+        "Введи ще пошук або натисни «Готово», щоб вийти.",
         reply_markup=done_inline_keyboard()
     )
-    await state.update_data(
-        last_done_chat_id=callback.message.chat.id,
-        last_done_message_id=callback.message.message_id,
-    )
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "force_add")
-async def force_add(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    product = data.get("pending_product", "").strip()
-    if not product:
-        await callback.message.edit_text("❌ Сесія застаріла. Додай товар знову.")
-        await callback.answer()
-        return
-    user_id = callback.from_user.id
-
-    if product_in_current_list(user_id, product):
-        await callback.message.edit_text(
-            "ℹ️ Цей товар вже є у поточному списку.",
-            reply_markup=done_inline_keyboard()
-        )
-        await callback.answer()
-        return
-
-    shopping_lists.setdefault(user_id, []).append(product)
-    all_products.add(product)
-    save_data(shopping_lists, all_products)
-
-    await clear_previous_done_keyboard(state, bot)
-    await callback.message.edit_text(
-        f"✅ «{product}» додано.\n"
-        "Можеш продовжувати. Коли закінчиш — натисни «Готово» внизу.",
-        reply_markup=done_inline_keyboard()
-    )
-    await state.update_data(
-        last_done_chat_id=callback.message.chat.id,
-        last_done_message_id=callback.message.message_id,
-    )
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "done")
-async def done(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text("👌 Режим додавання завершено")
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "cancel")
-async def cancel(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text("❌ Дію скасовано")
     await callback.answer()
 
 
