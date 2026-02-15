@@ -248,6 +248,7 @@ async def inline_search(inline_query: types.InlineQuery):
                         message_text=f"✅ Додано до списку: {p}"
                     ),
                 )
+            )
 
     await inline_query.answer(results, cache_time=10)
 
