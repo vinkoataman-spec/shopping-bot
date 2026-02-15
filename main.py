@@ -33,10 +33,6 @@ class AddProduct(StatesGroup):
     waiting_for_product = State()
 
 
-class SearchingProducts(StatesGroup):
-    waiting_query = State()
-
-
 # ---------- Bot ----------
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -84,18 +80,16 @@ async def clear_previous_done_keyboard(state: FSMContext, bot: Bot):
         pass
 
 
-def search_results_keyboard(matches: list):
-    """Інлайн-клавіатура: кнопки «Додати» для кожного товару + Готово."""
-    prefix = "add_from_search:"
-    rows = [
-        [InlineKeyboardButton(
-            text=f"➕ {p}",
-            callback_data=prefix + truncate_for_callback(p, prefix)
-        )]
-        for p in matches
-    ]
-    rows.append([InlineKeyboardButton(text="✅ Готово", callback_data="done")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+def inline_insert_keyboard():
+    """Кнопка: натиснув — у полі вводу зʼявляється @бот, можна одразу друкувати назву."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text="📝 Вставити @бота в поле вводу",
+                switch_inline_query_current_chat=" "
+            )]
+        ]
+    )
 
 
 # ---------- Helpers ----------
@@ -114,7 +108,7 @@ async def start(message: types.Message):
         "📋 <b>Поточний список</b> — показує всі товари, які ти додав(ла) і ще не купив(ла).\n\n"
         "✅ <b>Список виконано</b> — очищає список після того, як ти все купив(ла).\n\n"
         "🔍 <b>Пошук товарів</b> — кнопка відкриє режим пошуку (треба вводити і відправляти повідомлення).\n\n"
-        "💬 <b>Підказки БЕЗ відправки</b> — так працює тільки один спосіб: у <b>полі вводу повідомлення</b> напиши <b>@ім'я_бота</b> і одразу літери (наприклад: <code>@бот мол</code>). Зʼявиться випадаючий список — обирай товар, не натискаючи «Відправити». Якщо такого товару немає — зʼявиться «Додати?».\n\n"
+        "🔍 <b>Пошук товарів</b> — натисни, потім кнопку в повідомленні: у полі вводу зʼявиться @бот і пробіл, друкуй назву — підказки зʼявляться без відправки.\n\n"
         "Команда /help — коротка підказка.",
         parse_mode="HTML",
         reply_markup=main_keyboard
@@ -128,8 +122,7 @@ async def help_cmd(message: types.Message):
         "➕ <b>Додати товар</b> — ввести назви товарів (можна кілька підряд).\n"
         "📋 <b>Поточний список</b> — переглянути список покупок.\n"
         "✅ <b>Список виконано</b> — очистити список після покупок.\n"
-        "🔍 <b>Пошук товарів</b> — вводиш слово, відправляєш — отримуєш список; додати можна одним натисканням.\n"
-        "💬 <b>Підказки без відправки</b> — у полі вводу напиши @ім'я_бота і літери (наприклад @бот мол) — зʼявиться випадаючий список, можна вибрати товар не натискаючи «Відправити». У BotFather має бути увімкнено Inline (/setinline).",
+        "🔍 <b>Пошук товарів</b> — натисни, потім кнопку в повідомленні: у полі вводу зʼявиться @бот, друкуй назву товару. У BotFather має бути Inline (/setinline).",
         parse_mode="HTML"
     )
 
@@ -149,6 +142,7 @@ async def start_add(message: types.Message, state: FSMContext):
     )
 
 
+# Кнопки, при натисканні яких у режимі додавання/пошуку показуємо нагадування вийти
 MENU_BUTTONS = ("➕ Додати товар", "📋 Поточний список", "✅ Список виконано", "🔍 Пошук товарів")
 
 
@@ -196,12 +190,8 @@ async def add_product(message: types.Message, state: FSMContext):
 
 @dp.callback_query(lambda c: c.data == "done")
 async def done(callback: types.CallbackQuery, state: FSMContext):
-    current = await state.get_state()
     await state.clear()
-    if current and "SearchingProducts" in current:
-        await callback.message.edit_text("👌 Пошук завершено")
-    else:
-        await callback.message.edit_text("👌 Режим додавання завершено")
+    await callback.message.edit_text("👌 Режим додавання завершено")
     await callback.answer()
 
 
@@ -275,74 +265,18 @@ async def chosen_inline(chosen: types.ChosenInlineResult):
 
 # ---------- Пошук товарів ----------
 @dp.message(lambda m: m.text == "🔍 Пошук товарів")
-async def start_search(message: types.Message, state: FSMContext):
-    await state.set_state(SearchingProducts.waiting_query)
+async def start_search(message: types.Message):
     if not all_products:
         await message.answer(
             "🔍 Ще немає збережених товарів.\n"
-            "Спочатку додай товари через кнопку «➕ Додати товар» — тоді зʼявиться пошук.",
+            "Спочатку додай товари через кнопку «➕ Додати товар».",
             reply_markup=main_keyboard
         )
-        await state.clear()
-        return
-    hint = f" Для підказок <b>без відправки</b> напиши у полі вводу <b>@{BOT_USERNAME}</b> і літери (наприклад: @{BOT_USERNAME} мол)." if BOT_USERNAME else ""
-    await message.answer(
-        "🔍 Тут ти вводиш слово і <b>відправляєш</b> повідомлення — тоді я показую варіанти. "
-        "Так працює Telegram: я бачу лише вже відправлений текст.\n\n"
-        "Можеш додати товар з списку одним натисканням. Коли закінчиш — натисни «Готово»."
-        + hint,
-        parse_mode="HTML",
-        reply_markup=done_inline_keyboard()
-    )
-
-
-@dp.message(SearchingProducts.waiting_query, lambda m: m.text and m.text.strip() in MENU_BUTTONS)
-async def menu_pressed_while_searching(message: types.Message, state: FSMContext):
-    await message.answer(
-        "👀 Ти зараз у режимі пошуку.\n\n"
-        "Натисни кнопку <b>«Готово»</b> внизу, щоб вийти з пошуку.",
-        parse_mode="HTML",
-        reply_markup=done_inline_keyboard()
-    )
-
-
-@dp.message(SearchingProducts.waiting_query)
-async def search_products(message: types.Message, state: FSMContext):
-    query = message.text.strip().lower()
-    if not query:
-        return
-    # Підходящі товари: ті, у назві яких є введений текст
-    matches = sorted(p for p in all_products if query in p)[:15]
-    if not matches:
-        await message.answer(
-            f"По запиту «{query}» нічого не знайдено. Спробуй інші літери або слово.",
-            reply_markup=done_inline_keyboard()
-        )
         return
     await message.answer(
-        f"🔍 Знайдено по «{query}»:\nМожеш додати в список одним натисканням.",
-        reply_markup=search_results_keyboard(matches)
+        "Натисни кнопку нижче — у полі вводу одразу зʼявиться @бот і пробіл. Друкуй назву товару — зʼявляться підказки.",
+        reply_markup=inline_insert_keyboard()
     )
-
-
-@dp.callback_query(lambda c: c.data.startswith("add_from_search:"))
-async def add_from_search(callback: types.CallbackQuery):
-    product = callback.data.split(":", 1)[1]
-    user_id = callback.from_user.id
-
-    if product_in_current_list(user_id, product):
-        await callback.answer("ℹ️ Вже є в списку", show_alert=False)
-        return
-
-    shopping_lists.setdefault(user_id, []).append(product)
-    save_data(shopping_lists, all_products)
-
-    await callback.message.edit_text(
-        f"✅ «{product}» додано до списку.\n"
-        "Введи ще пошук або натисни «Готово», щоб вийти.",
-        reply_markup=done_inline_keyboard()
-    )
-    await callback.answer()
 
 
 @dp.message(lambda m: m.text == "📋 Поточний список")
