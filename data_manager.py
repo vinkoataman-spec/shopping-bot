@@ -3,11 +3,15 @@ import logging
 import os
 from pathlib import Path
 
-# Railway: якщо додаси Volume до сервісу, Railway сам ставить RAILWAY_VOLUME_MOUNT_PATH —
-# тоді зберігаємо data.json там (дані не пропадуть після редеплою).
-# Інакше використовуємо DATA_FILE з env або data.json у поточній папці.
+# Railway: Volume дає RAILWAY_VOLUME_MOUNT_PATH — пишемо туди. Інакше /tmp (завжди доступний для запису).
 _volume_path = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
-DATA_FILE = Path(_volume_path) / "data.json" if _volume_path else Path(os.getenv("DATA_FILE", "data.json"))
+if _volume_path:
+    DATA_FILE = Path(_volume_path) / "data.json"
+else:
+    # На Railway поточна папка часто read-only — використовуємо /tmp
+    _on_railway = bool(os.getenv("RAILWAY_SERVICE_NAME") or os.getenv("RAILWAY_PROJECT_NAME"))
+    _fallback = "/tmp/shopping_bot_data.json" if _on_railway else "data.json"
+    DATA_FILE = Path(os.getenv("DATA_FILE", _fallback))
 logger = logging.getLogger(__name__)
 
 # Максимальна довжина callback_data / inline result id в Telegram — 64 байти
@@ -61,6 +65,7 @@ def save_data(shopping_list, all_products):
         "all_products": list(all_products),
     }
     path = Path(DATA_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     try:
         with open(tmp, "w", encoding="utf-8") as f:

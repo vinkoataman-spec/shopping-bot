@@ -34,6 +34,15 @@ BOT_USERNAME = ""
 # ---------- Data: один спільний список для всіх користувачів ----------
 shopping_list, all_products = load_data()
 
+# Останнє повідомлення з кнопкою «Вставити @бота» — щоб прибрати кнопку, коли користувач натисне іншу
+_last_inline_button_msg: dict[int, tuple[int, int]] = {}  # user_id -> (chat_id, message_id)
+
+
+def reload_data():
+    """Перезавантажує список із файлу (щоб бачити зміни після збереження)."""
+    global shopping_list, all_products
+    shopping_list, all_products = load_data()
+
 
 # ---------- Keyboards ----------
 main_keyboard = ReplyKeyboardMarkup(
@@ -61,6 +70,23 @@ def inline_insert_keyboard():
 # ---------- Helpers ----------
 def product_in_list(product: str) -> bool:
     return product in shopping_list
+
+
+async def clear_last_inline_button(user_id: int):
+    """Прибирає кнопку «Вставити @бота» з попереднього повідомлення."""
+    if user_id not in _last_inline_button_msg:
+        return
+    chat_id, message_id = _last_inline_button_msg.pop(user_id, (None, None))
+    if chat_id is None:
+        return
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+        )
+    except Exception:
+        pass
 
 
 # ---------- Handlers ----------
@@ -91,10 +117,13 @@ async def help_cmd(message: types.Message):
 
 @dp.message(lambda m: m.text == "➕ Додати товар")
 async def add_product_prompt(message: types.Message):
-    await message.answer(
+    user_id = message.from_user.id
+    await clear_last_inline_button(user_id)
+    sent = await message.answer(
         "Натисни кнопку нижче — у полі вводу одразу зʼявиться @бот і пробіл. Друкуй назву товару — зʼявляться підказки, можна додати одним натисканням.",
         reply_markup=inline_insert_keyboard()
     )
+    _last_inline_button_msg[user_id] = (sent.chat.id, sent.message_id)
 
 
 # ---------- Inline Mode ----------
@@ -106,6 +135,7 @@ def _safe_id(s: str, max_len: int = 60) -> str:
 
 @dp.inline_query()
 async def inline_search(inline_query: types.InlineQuery):
+    reload_data()
     q = (inline_query.query or "").strip().lower()
     results = []
 
@@ -117,7 +147,7 @@ async def inline_search(inline_query: types.InlineQuery):
                     id=f"p:{i}",
                     title=p,
                     input_message_content=InputTextMessageContent(
-                        message_text=f"✅ Додано до списку: {p}"
+                        message_text=f"✅ Товар додано до поточного списку: {p}"
                     ),
                 )
             )
@@ -127,7 +157,7 @@ async def inline_search(inline_query: types.InlineQuery):
                     id=_safe_id(f"n:{q}"),
                     title=f"➕ Такого товару немає. Додати «{q}»?",
                     input_message_content=InputTextMessageContent(
-                        message_text=f"✅ Додано новий товар: {q}"
+                        message_text=f"✅ Додано новий товар до поточного списку: {q}"
                     ),
                 )
             )
@@ -138,7 +168,7 @@ async def inline_search(inline_query: types.InlineQuery):
                     id=f"p:{i}",
                     title=p,
                     input_message_content=InputTextMessageContent(
-                        message_text=f"✅ Додано до списку: {p}"
+                        message_text=f"✅ Товар додано до поточного списку: {p}"
                     ),
                 )
             )
@@ -148,6 +178,7 @@ async def inline_search(inline_query: types.InlineQuery):
 
 @dp.chosen_inline_result()
 async def chosen_inline(chosen: types.ChosenInlineResult):
+    reload_data()
     rid = chosen.result_id
     query = (chosen.query or "").strip().lower()
 
@@ -172,10 +203,13 @@ async def chosen_inline(chosen: types.ChosenInlineResult):
         return
     shopping_list.append(product)
     save_data(shopping_list, all_products)
+    logger.info("Додано товар: %s", product)
 
 
 @dp.message(lambda m: m.text == "📋 Поточний список")
 async def show_list(message: types.Message):
+    await clear_last_inline_button(message.from_user.id)
+    reload_data()
     if not shopping_list:
         await message.answer("🛒 Список порожній")
         return
@@ -185,7 +219,8 @@ async def show_list(message: types.Message):
 
 @dp.message(lambda m: m.text == "✅ Список виконано")
 async def clear_list(message: types.Message):
-    global shopping_list
+    await clear_last_inline_button(message.from_user.id)
+    reload_data()
     shopping_list.clear()
     save_data(shopping_list, all_products)
     await message.answer("🎉 Список очищено!")
