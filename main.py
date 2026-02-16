@@ -195,15 +195,31 @@ async def chosen_inline(chosen: types.ChosenInlineResult):
         product = query if query else rid[2:]
         if not product:
             return
-        all_products.add(product)
+        all_products.add(product)  # новий товар — додаємо в «всі товари» для пошуку
     else:
         return
 
     if product_in_list(product):
         return
-    shopping_list.append(product)
-    save_data(shopping_list, all_products)
-    logger.info("Додано товар: %s", product)
+    shopping_list.append(product)  # додаємо в поточний список покупок (обидва випадки: p: і n:)
+    try:
+        save_data(shopping_list, all_products)  # зберігаємо обидва списки в файл
+    except Exception as e:
+        logger.exception("Помилка збереження: %s", e)
+        return
+    logger.info("Додано товар: %s (всього в списку: %s)", product, len(shopping_list))
+
+    # Надсилаємо повідомлення з кнопкою «Вставити @бота», щоб можна було додати ще
+    user_id = chosen.from_user.id
+    try:
+        sent = await bot.send_message(
+            chat_id=user_id,
+            text="Товар додано до поточного списку. Додати ще? Натисни кнопку нижче.",
+            reply_markup=inline_insert_keyboard(),
+        )
+        _last_inline_button_msg[user_id] = (sent.chat.id, sent.message_id)
+    except Exception as e:
+        logger.warning("Не вдалося надіслати повідомлення з кнопкою: %s", e)
 
 
 @dp.message(lambda m: m.text == "📋 Поточний список")
