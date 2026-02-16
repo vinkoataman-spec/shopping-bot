@@ -11,6 +11,8 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
 )
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import TOKEN
@@ -25,6 +27,11 @@ logger = logging.getLogger(__name__)
 if not TOKEN:
     logger.error("Встановіть BOT_TOKEN у змінній середовища або в .env (див. .env.example)")
     raise SystemExit(1)
+
+# ---------- FSM ----------
+class AddByText(StatesGroup):
+    waiting_for_name = State()
+
 
 # ---------- Bot ----------
 bot = Bot(token=TOKEN)
@@ -67,6 +74,12 @@ def inline_insert_keyboard():
     )
 
 
+def done_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="✅ Готово", callback_data="add_done")]]
+    )
+
+
 # ---------- Helpers ----------
 def product_in_list(product: str) -> bool:
     return product in shopping_list
@@ -95,7 +108,7 @@ async def start(message: types.Message):
     await message.answer(
         "👋 <b>Вітаю!</b> Я бот для спільного списку покупок (для всієї родини).\n\n"
         "📌 <b>Що я вмію:</b>\n\n"
-        "➕ <b>Додати товар</b> — натисни кнопку, потім «Вставити @бота в поле вводу». У полі зʼявиться @бот і пробіл — друкуй назву товару, зʼявляться підказки.\n\n"
+        "➕ <b>Додати товар</b> — натисни кнопку. Можеш або використати пошук (@бот у полі вводу), або <b>просто написати назву товару в чат</b> — я додам у список.\n\n"
         "📋 <b>Поточний список</b> — показує спільний список покупок.\n\n"
         "✅ <b>Список виконано</b> — очищає список після покупок.\n\n"
         "Команда /help — коротка підказка.",
@@ -116,14 +129,67 @@ async def help_cmd(message: types.Message):
 
 
 @dp.message(lambda m: m.text == "➕ Додати товар")
-async def add_product_prompt(message: types.Message):
+async def add_product_prompt(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     await clear_last_inline_button(user_id)
+    await state.set_state(AddByText.waiting_for_name)
     sent = await message.answer(
-        "Натисни кнопку нижче — у полі вводу одразу зʼявиться @бот і пробіл. Друкуй назву товару — зʼявляться підказки, можна додати одним натисканням.",
-        reply_markup=inline_insert_keyboard()
+        "Можеш додати товар двома способами:\n\n"
+        "1️⃣ Натисни кнопку нижче — у полі вводу зʼявиться @бот, друкуй назву, обирай з підказок.\n\n"
+        "2️⃣ Або просто <b>напиши назву товару сюди в чат</b> (одним повідомленням) — я додам у список. Можеш писати кілька товарів по одному. Коли закінчиш — натисни «Готово».",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📝 Вставити @бота в поле вводу", switch_inline_query_current_chat=" ")],
+            [InlineKeyboardButton(text="✅ Готово", callback_data="add_done")],
+        ]),
     )
     _last_inline_button_msg[user_id] = (sent.chat.id, sent.message_id)
+
+
+# Додавання товару текстом у чат (надійно працює завжди)
+_MENU_TEXTS = ("📋 Поточний список", "✅ Список виконано", "➕ Додати товар")
+
+@dp.message(AddByText.waiting_for_name, lambda m: m.text and m.text.strip() in _MENU_TEXTS)
+async def menu_while_adding(message: types.Message, state: FSMContext):
+    await state.clear()
+    await clear_last_inline_button(message.from_user.id)
+    if message.text == "📋 Поточний список":
+        await show_list(message)
+    elif message.text == "✅ Список виконано":
+        await clear_list(message)
+    else:
+        await add_product_prompt(message, state)
+
+
+@dp.message(AddByText.waiting_for_name)
+async def add_product_by_text(message: types.Message, state: FSMContext):
+    product = (message.text or "").strip().lower()
+    if not product:
+        return
+    reload_data()
+    if product_in_list(product):
+        await message.answer("ℹ️ Цей товар вже є в списку.", reply_markup=done_keyboard())
+        return
+    shopping_list.append(product)
+    all_products.add(product)
+    try:
+        save_data(shopping_list, all_products)
+    except Exception as e:
+        logger.exception("Помилка збереження: %s", e)
+        await message.answer("❌ Помилка збереження. Спробуй ще раз.", reply_markup=done_keyboard())
+        return
+    await message.answer(
+        f"✅ «{product}» додано до поточного списку. Напиши ще товар або натисни «Готово».",
+        reply_markup=done_keyboard(),
+    )
+
+
+@dp.callback_query(lambda c: c.data == "add_done")
+async def add_done_callback(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await clear_last_inline_button(callback.from_user.id)
+    await callback.message.edit_text("👌 Готово. Список оновлено.")
+    await callback.answer()
 
 
 # ---------- Inline Mode ----------
