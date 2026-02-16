@@ -11,8 +11,6 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
 )
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import TOKEN
@@ -28,19 +26,13 @@ if not TOKEN:
     logger.error("Встановіть BOT_TOKEN у змінній середовища або в .env (див. .env.example)")
     raise SystemExit(1)
 
-# ---------- FSM ----------
-class AddProduct(StatesGroup):
-    waiting_for_product = State()
-
-
 # ---------- Bot ----------
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-BOT_USERNAME = ""  # встановлюється при старті (get_me)
+BOT_USERNAME = ""
 
-
-# ---------- Data ----------
-shopping_lists, all_products = load_data()
+# ---------- Data: один спільний список для всіх користувачів ----------
+shopping_list, all_products = load_data()
 
 
 # ---------- Keyboards ----------
@@ -49,39 +41,13 @@ main_keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text="➕ Додати товар")],
         [KeyboardButton(text="📋 Поточний список")],
         [KeyboardButton(text="✅ Список виконано")],
-        [KeyboardButton(text="🔍 Пошук товарів")],
     ],
     resize_keyboard=True
 )
 
 
-def done_inline_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Готово", callback_data="done")]
-        ]
-    )
-
-
-async def clear_previous_done_keyboard(state: FSMContext, bot: Bot):
-    """Прибирає кнопку «Готово» з попереднього повідомлення бота."""
-    data = await state.get_data()
-    chat_id = data.get("last_done_chat_id")
-    message_id = data.get("last_done_message_id")
-    if not chat_id or not message_id:
-        return
-    try:
-        await bot.edit_message_reply_markup(
-            chat_id=chat_id,
-            message_id=message_id,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[])
-        )
-    except Exception:
-        pass
-
-
 def inline_insert_keyboard():
-    """Кнопка: натиснув — у полі вводу зʼявляється @бот, можна одразу друкувати назву."""
+    """Натиснув — у полі вводу зʼявляється @бот і пробіл."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(
@@ -93,22 +59,19 @@ def inline_insert_keyboard():
 
 
 # ---------- Helpers ----------
-def product_in_current_list(user_id: int, product: str) -> bool:
-    return product in shopping_lists.get(user_id, [])
+def product_in_list(product: str) -> bool:
+    return product in shopping_list
 
 
 # ---------- Handlers ----------
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "👋 <b>Вітаю!</b> Я бот для списку покупок.\n\n"
+        "👋 <b>Вітаю!</b> Я бот для спільного списку покупок (для всієї родини).\n\n"
         "📌 <b>Що я вмію:</b>\n\n"
-        "➕ <b>Додати товар</b> — натисни кнопку і надсилай назви товарів (можна кілька підряд). "
-        "Коли закінчиш, натисни «Готово».\n\n"
-        "📋 <b>Поточний список</b> — показує всі товари, які ти додав(ла) і ще не купив(ла).\n\n"
-        "✅ <b>Список виконано</b> — очищає список після того, як ти все купив(ла).\n\n"
-        "🔍 <b>Пошук товарів</b> — кнопка відкриє режим пошуку (треба вводити і відправляти повідомлення).\n\n"
-        "🔍 <b>Пошук товарів</b> — натисни, потім кнопку в повідомленні: у полі вводу зʼявиться @бот і пробіл, друкуй назву — підказки зʼявляться без відправки.\n\n"
+        "➕ <b>Додати товар</b> — натисни кнопку, потім «Вставити @бота в поле вводу». У полі зʼявиться @бот і пробіл — друкуй назву товару, зʼявляться підказки.\n\n"
+        "📋 <b>Поточний список</b> — показує спільний список покупок.\n\n"
+        "✅ <b>Список виконано</b> — очищає список після покупок.\n\n"
         "Команда /help — коротка підказка.",
         parse_mode="HTML",
         reply_markup=main_keyboard
@@ -119,85 +82,26 @@ async def start(message: types.Message):
 async def help_cmd(message: types.Message):
     await message.answer(
         "📖 <b>Команди та кнопки</b>\n\n"
-        "➕ <b>Додати товар</b> — ввести назви товарів (можна кілька підряд).\n"
-        "📋 <b>Поточний список</b> — переглянути список покупок.\n"
-        "✅ <b>Список виконано</b> — очистити список після покупок.\n"
-        "🔍 <b>Пошук товарів</b> — натисни, потім кнопку в повідомленні: у полі вводу зʼявиться @бот, друкуй назву товару. У BotFather має бути Inline (/setinline).",
+        "➕ <b>Додати товар</b> — натисни, потім кнопку в повідомленні: у полі вводу зʼявиться @бот, друкуй назву. У BotFather має бути Inline (/setinline).\n"
+        "📋 <b>Поточний список</b> — переглянути спільний список.\n"
+        "✅ <b>Список виконано</b> — очистити список після покупок.",
         parse_mode="HTML"
     )
 
 
 @dp.message(lambda m: m.text == "➕ Додати товар")
-async def start_add(message: types.Message, state: FSMContext):
-    await state.set_state(AddProduct.waiting_for_product)
-    sent = await message.answer(
-        "✍️ Напиши назву товару. Можеш надсилати кілька повідомлень підряд.\n\n"
-        "Коли додаси всі товари — натисни кнопку <b>«Готово»</b> внизу.",
-        parse_mode="HTML",
-        reply_markup=done_inline_keyboard()
-    )
-    await state.update_data(
-        last_done_chat_id=sent.chat.id,
-        last_done_message_id=sent.message_id,
+async def add_product_prompt(message: types.Message):
+    await message.answer(
+        "Натисни кнопку нижче — у полі вводу одразу зʼявиться @бот і пробіл. Друкуй назву товару — зʼявляться підказки, можна додати одним натисканням.",
+        reply_markup=inline_insert_keyboard()
     )
 
 
-# Кнопки, при натисканні яких у режимі додавання/пошуку показуємо нагадування вийти
-MENU_BUTTONS = ("➕ Додати товар", "📋 Поточний список", "✅ Список виконано", "🔍 Пошук товарів")
-
-
-@dp.message(AddProduct.waiting_for_product, lambda m: m.text and m.text in MENU_BUTTONS)
-async def menu_pressed_while_adding(message: types.Message, state: FSMContext):
-    sent = await message.answer(
-        "👀 Схоже, ти забув вийти з режиму додавання.\n\n"
-        "Або натисни кнопку <b>«Готово»</b> внизу, або продовжуй надсилати назви товарів.",
-        parse_mode="HTML",
-        reply_markup=done_inline_keyboard()
-    )
-    await state.update_data(
-        last_done_chat_id=sent.chat.id,
-        last_done_message_id=sent.message_id,
-    )
-
-
-@dp.message(AddProduct.waiting_for_product)
-async def add_product(message: types.Message, state: FSMContext):
-    product = message.text.strip().lower()
-    user_id = message.from_user.id
-
-    if not product:
-        return
-
-    if product_in_current_list(user_id, product):
-        await message.answer("ℹ️ Цей товар вже є у поточному списку.")
-        return
-
-    shopping_lists.setdefault(user_id, []).append(product)
-    all_products.add(product)
-    save_data(shopping_lists, all_products)
-
-    await clear_previous_done_keyboard(state, bot)
-    sent = await message.answer(
-        f"✅ «{product}» додано.\n"
-        "Можеш продовжувати. Коли закінчиш — натисни «Готово» внизу.",
-        reply_markup=done_inline_keyboard()
-    )
-    await state.update_data(
-        last_done_chat_id=sent.chat.id,
-        last_done_message_id=sent.message_id,
-    )
-
-
-@dp.callback_query(lambda c: c.data == "done")
-async def done(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text("👌 Режим додавання завершено")
-    await callback.answer()
-
-
-# ---------- Inline Mode (пиши @бота + літери — підказки без відправки) ----------
-def _inline_id(prefix: str, text: str) -> str:
-    return prefix + truncate_for_callback(text, prefix)
+# ---------- Inline Mode ----------
+def _safe_id(s: str, max_len: int = 60) -> str:
+    """Унікальний id для inline результату (обмеження 64 байти)."""
+    b = s.encode("utf-8")[:max_len]
+    return b.decode("utf-8", errors="ignore") or "x"
 
 
 @dp.inline_query()
@@ -207,10 +111,10 @@ async def inline_search(inline_query: types.InlineQuery):
 
     if q:
         matches = sorted(p for p in all_products if q in p)[:15]
-        for p in matches:
+        for i, p in enumerate(matches):
             results.append(
                 InlineQueryResultArticle(
-                    id=_inline_id("p:", p),
+                    id=f"p:{i}",
                     title=p,
                     input_message_content=InputTextMessageContent(
                         message_text=f"✅ Додано до списку: {p}"
@@ -218,10 +122,9 @@ async def inline_search(inline_query: types.InlineQuery):
                 )
             )
         if not matches:
-            # Такого товару немає — пропонуємо додати
             results.append(
                 InlineQueryResultArticle(
-                    id=_inline_id("n:", q),
+                    id=_safe_id(f"n:{q}"),
                     title=f"➕ Такого товару немає. Додати «{q}»?",
                     input_message_content=InputTextMessageContent(
                         message_text=f"✅ Додано новий товар: {q}"
@@ -229,11 +132,10 @@ async def inline_search(inline_query: types.InlineQuery):
                 )
             )
     else:
-        # Порожній запит — показати кілька останніх/популярних або підказку
-        for p in sorted(all_products)[:10]:
+        for i, p in enumerate(sorted(all_products)[:10]):
             results.append(
                 InlineQueryResultArticle(
-                    id=_inline_id("p:", p),
+                    id=f"p:{i}",
                     title=p,
                     input_message_content=InputTextMessageContent(
                         message_text=f"✅ Додано до списку: {p}"
@@ -246,62 +148,52 @@ async def inline_search(inline_query: types.InlineQuery):
 
 @dp.chosen_inline_result()
 async def chosen_inline(chosen: types.ChosenInlineResult):
-    user_id = chosen.from_user.id
     rid = chosen.result_id
+    query = (chosen.query or "").strip().lower()
 
     if rid.startswith("p:"):
-        product = rid[2:]
+        try:
+            idx = int(rid[2:])
+        except ValueError:
+            return
+        matches = sorted(p for p in all_products if not query or query in p)[:15]
+        if idx < 0 or idx >= len(matches):
+            return
+        product = matches[idx]
     elif rid.startswith("n:"):
-        product = rid[2:]
+        product = query if query else rid[2:]
+        if not product:
+            return
         all_products.add(product)
     else:
         return
 
-    if product_in_current_list(user_id, product):
+    if product_in_list(product):
         return
-    shopping_lists.setdefault(user_id, []).append(product)
-    save_data(shopping_lists, all_products)
-
-
-# ---------- Пошук товарів ----------
-@dp.message(lambda m: m.text == "🔍 Пошук товарів")
-async def start_search(message: types.Message):
-    if not all_products:
-        await message.answer(
-            "🔍 Ще немає збережених товарів.\n"
-            "Спочатку додай товари через кнопку «➕ Додати товар».",
-            reply_markup=main_keyboard
-        )
-        return
-    await message.answer(
-        "Натисни кнопку нижче — у полі вводу одразу зʼявиться @бот і пробіл. Друкуй назву товару — зʼявляться підказки.",
-        reply_markup=inline_insert_keyboard()
-    )
+    shopping_list.append(product)
+    save_data(shopping_list, all_products)
 
 
 @dp.message(lambda m: m.text == "📋 Поточний список")
 async def show_list(message: types.Message):
-    items = shopping_lists.get(message.from_user.id, [])
-
-    if not items:
-        await message.answer("🛒 Поточний список порожній")
+    if not shopping_list:
+        await message.answer("🛒 Список порожній")
         return
-
-    text = "📝 Поточний список:\n" + "\n".join(f"• {i}" for i in items)
+    text = "📝 Спільний список покупок:\n" + "\n".join(f"• {i}" for i in shopping_list)
     await message.answer(text)
 
 
 @dp.message(lambda m: m.text == "✅ Список виконано")
 async def clear_list(message: types.Message):
-    shopping_lists[message.from_user.id] = []
-    save_data(shopping_lists, all_products)
-
-    await message.answer("🎉 Поточний список очищено!")
+    global shopping_list
+    shopping_list.clear()
+    save_data(shopping_list, all_products)
+    await message.answer("🎉 Список очищено!")
 
 
 # ---------- Start ----------
 async def main():
-    global BOT_USERNAME
+    global BOT_USERNAME, shopping_list, all_products
     me = await bot.get_me()
     BOT_USERNAME = me.username or "bot"
     logger.info("Бот запущено: @%s", BOT_USERNAME)
@@ -310,4 +202,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
