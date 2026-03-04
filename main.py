@@ -46,6 +46,10 @@ shopping_list, all_products, checked = load_data()
 
 # Останнє повідомлення з кнопкою «Вставити @бота» — щоб прибрати кнопку, коли користувач натисне іншу
 _last_inline_button_msg: dict[int, tuple[int, int]] = {}  # user_id -> (chat_id, message_id)
+# Останнє повідомлення з офлайн-файлом по чату — видаляємо при «Список виконано»
+_last_export_message: dict[int, int] = {}  # chat_id -> message_id
+# Останнє повідомлення зі списком (кнопки) — прибираємо при натисканні будь-якої кнопки меню
+_last_list_message: dict[int, int] = {}  # chat_id -> message_id
 
 
 def reload_data():
@@ -99,6 +103,19 @@ async def clear_last_inline_button(user_id: int):
         pass
 
 
+async def clear_last_list_message(chat_id: int):
+    """Видаляє повідомлення зі списком (кнопки), якщо воно було — при натисканні кнопки меню."""
+    if chat_id not in _last_list_message:
+        return
+    msg_id = _last_list_message.pop(chat_id, None)
+    if msg_id is None:
+        return
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+    except Exception:
+        pass
+
+
 # ---------- Handlers ----------
 @dp.message(Command("start"))
 async def start(message: types.Message, state: FSMContext):
@@ -130,6 +147,7 @@ async def help_cmd(message: types.Message):
 async def add_product_prompt(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     await clear_last_inline_button(user_id)
+    await clear_last_list_message(message.chat.id)
     await state.set_state(AddByText.waiting_for_name)
     sent = await message.answer(
         "Натисни кнопку нижче — у полі вводу зʼявиться @бот, друкуй назву товару, обирай з підказок. Або напиши назву товару сюди в чат.",
@@ -285,19 +303,28 @@ async def chosen_inline(chosen: types.ChosenInlineResult):
 @dp.message(lambda m: m.text == "📋 Поточний список")
 async def show_list(message: types.Message):
     await clear_last_inline_button(message.from_user.id)
+    await clear_last_list_message(message.chat.id)
     reload_data()
     if not shopping_list:
         await message.answer("🛒 Список порожній")
         return
     text, keyboard = _build_list_message()
-    await message.answer(text, reply_markup=keyboard)
+    sent = await message.answer(text, reply_markup=keyboard)
+    _last_list_message[message.chat.id] = sent.message_id
+
+
+def _sorted_list():
+    """Список товарів: спочатку без галочки, потім з галочкою."""
+    unchecked = [p for p in shopping_list if p not in checked]
+    checked_items = [p for p in shopping_list if p in checked]
+    return unchecked + checked_items
 
 
 def _build_list_message():
     """Повертає (мінімальний текст, інлайн-клавіатура — лише кнопки)."""
     rows = []
     prefix = "tick:"
-    for p in shopping_list:
+    for p in _sorted_list():
         is_checked = p in checked
         sym = "☑" if is_checked else "☐"
         cb = prefix + truncate_for_callback(p, prefix)
@@ -337,7 +364,7 @@ async def export_list_file(callback: types.CallbackQuery):
     """Відправляє HTML з реальними чекбоксами — на iPhone відкрий у Safari, галочки натискаються."""
     reload_data()
     items = []
-    for p in shopping_list:
+    for p in _sorted_list():
         safe = html.escape(p)
         if p in checked:
             items.append(f'<label class="item"><input type="checkbox" checked> {safe}</label>')
@@ -363,10 +390,11 @@ h1 { font-size: 1.2rem; }
 </body>
 </html>"""
     file = BufferedInputFile(content.encode("utf-8"), filename="список_покупок.html")
-    await callback.message.answer_document(
+    sent = await callback.message.answer_document(
         file,
         caption="Збережи файл → Відкрий у Safari (або «Відкрити в» → Safari). Галочки натискаються, працює без інтернету.",
     )
+    _last_export_message[callback.message.chat.id] = sent.message_id
     await callback.answer()
 
 
@@ -374,10 +402,19 @@ h1 { font-size: 1.2rem; }
 async def clear_list(message: types.Message):
     global checked
     await clear_last_inline_button(message.from_user.id)
+    await clear_last_list_message(message.chat.id)
     reload_data()
     shopping_list.clear()
     checked.clear()
     save_data(shopping_list, all_products, checked)
+    # Видалити останнє повідомлення з офлайн-файлом у цьому чаті
+    chat_id = message.chat.id
+    if chat_id in _last_export_message:
+        try:
+            await bot.delete_message(chat_id, _last_export_message[chat_id])
+        except Exception:
+            pass
+        del _last_export_message[chat_id]
     await message.answer("🎉 Список очищено!")
 
 
