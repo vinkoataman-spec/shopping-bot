@@ -293,19 +293,16 @@ async def show_list(message: types.Message):
 
 
 def _build_list_message():
-    """Повертає (текст списку, інлайн-клавіатура з галочками)."""
-    lines = []
+    """Повертає (мінімальний текст, інлайн-клавіатура — лише кнопки)."""
     rows = []
     prefix = "tick:"
     for p in shopping_list:
         is_checked = p in checked
         sym = "☑" if is_checked else "☐"
-        lines.append(f"{sym} {p}")
         cb = prefix + truncate_for_callback(p, prefix)
         rows.append([InlineKeyboardButton(text=f"{sym} {p}", callback_data=cb)])
     rows.append([InlineKeyboardButton(text="📥 Завантажити список (офлайн)", callback_data="export_list")])
-    text = "📝 Спільний список (натисни — поставити або зняти галочку):\n\n" + "\n".join(lines)
-    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+    return "📋", InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 @dp.callback_query(lambda c: c.data.startswith("tick:"))
@@ -336,15 +333,21 @@ async def toggle_tick(callback: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "export_list")
 async def export_list_file(callback: types.CallbackQuery):
-    """Відправляє список у .txt — можна відкрити без інтернету і ставити галочки на папері."""
+    """Відправляє список у .md з чекбоксами — у багатьох нотатках їх можна натискати офлайн."""
     reload_data()
+    # Markdown: - [ ] та - [x] — у Нотатках (iOS/Android), Notion тощо галочки ставляться по тапу
     lines = []
     for p in shopping_list:
-        sym = "☑" if p in checked else "☐"
-        lines.append(f"{sym} {p}")
-    content = "Список покупок\n\n" + "\n".join(lines) + "\n"
-    file = BufferedInputFile(content.encode("utf-8"), filename="список_покупок.txt")
-    await callback.message.answer_document(file, caption="Збережи файл — у магазині можна використати без інтернету (на папері або в нотатках).")
+        if p in checked:
+            lines.append(f"- [x] {p}")
+        else:
+            lines.append(f"- [ ] {p}")
+    content = "# Список покупок\n\n" + "\n".join(lines) + "\n"
+    file = BufferedInputFile(content.encode("utf-8"), filename="список_покупок.md")
+    await callback.message.answer_document(
+        file,
+        caption="Збережи файл і відкрий у додатку «Нотатки» або іншому редакторі — у багатьох програмах галочки [ ] можна ставити натисканням. Якщо ні — друкуй список або змінюй вручну.",
+    )
     await callback.answer()
 
 
