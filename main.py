@@ -1,4 +1,5 @@
 import asyncio
+import html
 import io
 import logging
 
@@ -333,20 +334,38 @@ async def toggle_tick(callback: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "export_list")
 async def export_list_file(callback: types.CallbackQuery):
-    """Відправляє список у .md з чекбоксами — у багатьох нотатках їх можна натискати офлайн."""
+    """Відправляє HTML з реальними чекбоксами — на iPhone відкрий у Safari, галочки натискаються."""
     reload_data()
-    # Markdown: - [ ] та - [x] — у Нотатках (iOS/Android), Notion тощо галочки ставляться по тапу
-    lines = []
+    items = []
     for p in shopping_list:
+        safe = html.escape(p)
         if p in checked:
-            lines.append(f"- [x] {p}")
+            items.append(f'<label class="item"><input type="checkbox" checked> {safe}</label>')
         else:
-            lines.append(f"- [ ] {p}")
-    content = "# Список покупок\n\n" + "\n".join(lines) + "\n"
-    file = BufferedInputFile(content.encode("utf-8"), filename="список_покупок.md")
+            items.append(f'<label class="item"><input type="checkbox"> {safe}</label>')
+    content = """<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Список покупок</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; padding: 16px; }
+h1 { font-size: 1.2rem; }
+.item { display: block; padding: 10px 0; font-size: 1.1rem; }
+.item input { margin-right: 10px; transform: scale(1.3); }
+.item:has(input:checked) { color: #666; text-decoration: line-through; }
+</style>
+</head>
+<body>
+<h1>Список покупок</h1>
+""" + "\n".join(items) + """
+</body>
+</html>"""
+    file = BufferedInputFile(content.encode("utf-8"), filename="список_покупок.html")
     await callback.message.answer_document(
         file,
-        caption="Збережи файл і відкрий у додатку «Нотатки» або іншому редакторі — у багатьох програмах галочки [ ] можна ставити натисканням. Якщо ні — друкуй список або змінюй вручну.",
+        caption="Збережи файл → Відкрий у Safari (або «Відкрити в» → Safari). Галочки натискаються, працює без інтернету.",
     )
     await callback.answer()
 
