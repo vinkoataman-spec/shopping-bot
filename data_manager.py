@@ -28,24 +28,23 @@ def truncate_for_callback(text: str, prefix: str) -> str:
 
 
 def load_data():
-    """Повертає (спільний список покупок, множина всіх товарів для підказок)."""
+    """Повертає (спільний список покупок, множина всіх товарів, множина позначених галочкою)."""
     if not DATA_FILE.exists():
-        return [], set()
+        return [], set(), set()
 
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
         logger.exception("Помилка читання %s: %s", DATA_FILE, e)
-        return [], set()
+        return [], set(), set()
 
-    # Новий формат: один список для всіх
     if "shopping_list" in data:
         shopping_list = list(data.get("shopping_list", []))
         all_products = set(data.get("all_products", []))
-        return shopping_list, all_products
+        checked = set(data.get("checked", []))
+        return shopping_list, all_products, checked
 
-    # Міграція зі старого формату (списки по user_id) — об'єднуємо в один
     old_lists = data.get("shopping_lists", {})
     if isinstance(old_lists, dict):
         merged = []
@@ -53,16 +52,19 @@ def load_data():
             if isinstance(items, list):
                 merged.extend(items)
         all_products = set(data.get("all_products", [])) | set(merged)
-        return merged, all_products
+        return merged, all_products, set()
 
-    return [], set(data.get("all_products", []))
+    return [], set(data.get("all_products", [])), set()
 
 
-def save_data(shopping_list, all_products):
-    """Зберігає спільний список і множину товарів."""
+def save_data(shopping_list, all_products, checked=None):
+    """Зберігає спільний список, множину товарів і позначені галочкою."""
+    if checked is None:
+        checked = set()
     data = {
         "shopping_list": list(shopping_list),
         "all_products": list(all_products),
+        "checked": list(checked),
     }
     path = Path(DATA_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,7 +1,9 @@
 import asyncio
+import io
 import logging
 
 from aiogram import Bot, Dispatcher, types
+from aiogram.types import BufferedInputFile
 from aiogram.filters import Command
 from aiogram.types import (
     InlineKeyboardButton,
@@ -39,7 +41,7 @@ dp = Dispatcher(storage=MemoryStorage())
 BOT_USERNAME = ""
 
 # ---------- Data: один спільний список для всіх користувачів ----------
-shopping_list, all_products = load_data()
+shopping_list, all_products, checked = load_data()
 
 # Останнє повідомлення з кнопкою «Вставити @бота» — щоб прибрати кнопку, коли користувач натисне іншу
 _last_inline_button_msg: dict[int, tuple[int, int]] = {}  # user_id -> (chat_id, message_id)
@@ -47,8 +49,8 @@ _last_inline_button_msg: dict[int, tuple[int, int]] = {}  # user_id -> (chat_id,
 
 def reload_data():
     """Перезавантажує список із файлу (щоб бачити зміни після збереження)."""
-    global shopping_list, all_products
-    shopping_list, all_products = load_data()
+    global shopping_list, all_products, checked
+    shopping_list, all_products, checked = load_data()
 
 
 # ---------- Keyboards ----------
@@ -167,7 +169,7 @@ async def add_product_by_text(message: types.Message, state: FSMContext):
     shopping_list.append(product)
     all_products.add(product)
     try:
-        save_data(shopping_list, all_products)
+        save_data(shopping_list, all_products, checked)
     except Exception as e:
         logger.exception("Помилка збереження: %s", e)
         await message.answer("❌ Помилка збереження. Спробуй ще раз.", reply_markup=inline_insert_keyboard())
@@ -262,7 +264,7 @@ async def chosen_inline(chosen: types.ChosenInlineResult):
 
     shopping_list.append(product)
     try:
-        save_data(shopping_list, all_products)
+        save_data(shopping_list, all_products, checked)
     except Exception as e:
         logger.exception("Помилка збереження: %s", e)
         return
@@ -286,16 +288,74 @@ async def show_list(message: types.Message):
     if not shopping_list:
         await message.answer("🛒 Список порожній")
         return
-    text = "📝 Спільний список покупок:\n" + "\n".join(f"• {i}" for i in shopping_list)
-    await message.answer(text)
+    text, keyboard = _build_list_message()
+    await message.answer(text, reply_markup=keyboard)
+
+
+def _build_list_message():
+    """Повертає (текст списку, інлайн-клавіатура з галочками)."""
+    lines = []
+    rows = []
+    prefix = "tick:"
+    for p in shopping_list:
+        is_checked = p in checked
+        sym = "☑" if is_checked else "☐"
+        lines.append(f"{sym} {p}")
+        cb = prefix + truncate_for_callback(p, prefix)
+        rows.append([InlineKeyboardButton(text=f"{sym} {p}", callback_data=cb)])
+    rows.append([InlineKeyboardButton(text="📥 Завантажити список (офлайн)", callback_data="export_list")])
+    text = "📝 Спільний список (натисни — поставити або зняти галочку):\n\n" + "\n".join(lines)
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(lambda c: c.data.startswith("tick:"))
+async def toggle_tick(callback: types.CallbackQuery):
+    """Перемикає галочку біля товару."""
+    global checked
+    reload_data()
+    product = callback.data.split(":", 1)[1]
+    # Знаходимо повне ім'я (на випадок обрізання)
+    match = next((p for p in shopping_list if p == product or truncate_for_callback(p, "tick:") == product), None)
+    if match is None:
+        await callback.answer("Товар не знайдено")
+        return
+    if match in checked:
+        checked.discard(match)
+    else:
+        checked.add(match)
+    try:
+        save_data(shopping_list, all_products, checked)
+    except Exception as e:
+        logger.exception("Помилка збереження: %s", e)
+        await callback.answer("Помилка")
+        return
+    text, keyboard = _build_list_message()
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data == "export_list")
+async def export_list_file(callback: types.CallbackQuery):
+    """Відправляє список у .txt — можна відкрити без інтернету і ставити галочки на папері."""
+    reload_data()
+    lines = []
+    for p in shopping_list:
+        sym = "☑" if p in checked else "☐"
+        lines.append(f"{sym} {p}")
+    content = "Список покупок\n\n" + "\n".join(lines) + "\n"
+    file = BufferedInputFile(content.encode("utf-8"), filename="список_покупок.txt")
+    await callback.message.answer_document(file, caption="Збережи файл — у магазині можна використати без інтернету (на папері або в нотатках).")
+    await callback.answer()
 
 
 @dp.message(lambda m: m.text == "✅ Список виконано")
 async def clear_list(message: types.Message):
+    global checked
     await clear_last_inline_button(message.from_user.id)
     reload_data()
     shopping_list.clear()
-    save_data(shopping_list, all_products)
+    checked.clear()
+    save_data(shopping_list, all_products, checked)
     await message.answer("🎉 Список очищено!")
 
 
