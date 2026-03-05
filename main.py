@@ -335,24 +335,29 @@ def _build_list_message():
 
 @dp.callback_query(lambda c: c.data.startswith("tick:"))
 async def toggle_tick(callback: types.CallbackQuery):
-    """Перемикає галочку біля товару."""
-    global checked
+    """Поставлена галочка = товар прибирається зі списку (онлайн). Знята галочка = лишається в списку."""
+    global shopping_list, checked
     reload_data()
     product = callback.data.split(":", 1)[1]
-    # Знаходимо повне ім'я (на випадок обрізання)
     match = next((p for p in shopping_list if p == product or truncate_for_callback(p, "tick:") == product), None)
     if match is None:
         await callback.answer("Товар не знайдено")
         return
     if match in checked:
-        checked.discard(match)
+        checked.discard(match)  # зняти галочку — лишається в списку
     else:
-        checked.add(match)
+        # поставити галочку — прибрати товар зі списку (не треба відправляти вниз)
+        shopping_list.remove(match)
+        checked.discard(match)
     try:
         save_data(shopping_list, all_products, checked)
     except Exception as e:
         logger.exception("Помилка збереження: %s", e)
         await callback.answer("Помилка")
+        return
+    if not shopping_list:
+        await callback.message.edit_text("🛒 Список порожній", reply_markup=InlineKeyboardMarkup(inline_keyboard=[]))
+        await callback.answer()
         return
     text, keyboard = _build_list_message()
     await callback.message.edit_text(text, reply_markup=keyboard)
