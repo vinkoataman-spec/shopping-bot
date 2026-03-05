@@ -116,6 +116,19 @@ async def clear_last_list_message(chat_id: int):
         pass
 
 
+async def clear_last_export_message(chat_id: int):
+    """Видаляє останнє повідомлення з офлайн HTML-файлом — при натисканні будь-якої кнопки меню."""
+    if chat_id not in _last_export_message:
+        return
+    msg_id = _last_export_message.pop(chat_id, None)
+    if msg_id is None:
+        return
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+    except Exception:
+        pass
+
+
 # ---------- Handlers ----------
 @dp.message(Command("start"))
 async def start(message: types.Message, state: FSMContext):
@@ -147,7 +160,7 @@ async def help_cmd(message: types.Message):
 async def add_product_prompt(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     await clear_last_inline_button(user_id)
-    await clear_last_list_message(message.chat.id)
+    # Онлайн-список не прибираємо — лишається; стікер не чіпаємо
     await state.set_state(AddByText.waiting_for_name)
     sent = await message.answer(
         "Натисни кнопку нижче — у полі вводу зʼявиться @бот, друкуй назву товару, обирай з підказок. Або напиши назву товару сюди в чат.",
@@ -408,18 +421,11 @@ async def clear_list(message: types.Message):
     global checked
     await clear_last_inline_button(message.from_user.id)
     await clear_last_list_message(message.chat.id)
+    await clear_last_export_message(message.chat.id)
     reload_data()
     shopping_list.clear()
     checked.clear()
     save_data(shopping_list, all_products, checked)
-    # Видалити останнє повідомлення з офлайн-файлом у цьому чаті
-    chat_id = message.chat.id
-    if chat_id in _last_export_message:
-        try:
-            await bot.delete_message(chat_id, _last_export_message[chat_id])
-        except Exception:
-            pass
-        del _last_export_message[chat_id]
     await message.answer("🎉 Список очищено!")
 
 
