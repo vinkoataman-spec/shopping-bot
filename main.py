@@ -20,6 +20,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import TOKEN
 from data_manager import load_data, save_data, truncate_for_callback
+from families import get_family_id
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,21 +42,13 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 BOT_USERNAME = ""
 
-# ---------- Data: один спільний список для всіх користувачів ----------
-shopping_list, all_products, checked = load_data()
-
+# ---------- Data: список по сім'ях (families.json — id учасників) ----------
 # Останнє повідомлення з кнопкою «Вставити @бота» — щоб прибрати кнопку, коли користувач натисне іншу
 _last_inline_button_msg: dict[int, tuple[int, int]] = {}  # user_id -> (chat_id, message_id)
 # Останнє повідомлення з офлайн-файлом по чату — видаляємо при «Список виконано»
 _last_export_message: dict[int, int] = {}  # chat_id -> message_id
 # Останнє повідомлення зі списком (кнопки) — прибираємо при натисканні будь-якої кнопки меню
 _last_list_message: dict[int, int] = {}  # chat_id -> message_id
-
-
-def reload_data():
-    """Перезавантажує список із файлу (щоб бачити зміни після збереження)."""
-    global shopping_list, all_products, checked
-    shopping_list, all_products, checked = load_data()
 
 
 # ---------- Keyboards ----------
@@ -82,7 +75,15 @@ def inline_insert_keyboard():
 
 
 # ---------- Helpers ----------
-def product_in_list(product: str) -> bool:
+NO_ACCESS_TEXT = "🚫 У вас немає доступу до бота. Зверніться до того, хто налаштував бота, щоб додати ваш ID у список сім'ї."
+
+
+def has_access(user_id: int) -> bool:
+    """Доступ є лише якщо user_id записаний в одній із сімей у families.json."""
+    return get_family_id(user_id) != "default"
+
+
+def product_in_list(product: str, shopping_list: list) -> bool:
     return product in shopping_list
 
 
@@ -132,9 +133,12 @@ async def clear_last_export_message(chat_id: int):
 # ---------- Handlers ----------
 @dp.message(Command("start"))
 async def start(message: types.Message, state: FSMContext):
-    await state.clear()  # виходимо з режиму додавання
+    await state.clear()
+    if not has_access(message.from_user.id):
+        await message.answer(NO_ACCESS_TEXT)
+        return
     await message.answer(
-        "👋 <b>Вітаю!</b> Я бот для спільного списку покупок (для всієї родини).\n\n"
+        "👋 <b>Вітаю!</b> Я бот для списку покупок. Список залежить від сім'ї (ID в families.json).\n\n"
         "📌 <b>Що я вмію:</b>\n\n"
         "➕ <b>Додати товар</b> — натисни кнопку, потім кнопку знизу — у полі вводу зʼявиться @бот, друкуй назву. Або напиши назву товару в чат.\n\n"
         "📋 <b>Поточний список</b> — показує спільний список покупок.\n\n"
@@ -147,6 +151,9 @@ async def start(message: types.Message, state: FSMContext):
 
 @dp.message(Command("help"))
 async def help_cmd(message: types.Message):
+    if not has_access(message.from_user.id):
+        await message.answer(NO_ACCESS_TEXT)
+        return
     await message.answer(
         "📖 <b>Команди та кнопки</b>\n\n"
         "➕ <b>Додати товар</b> — натисни, потім кнопку в повідомленні: у полі вводу зʼявиться @бот, друкуй назву. У BotFather має бути Inline (/setinline).\n"
@@ -159,6 +166,9 @@ async def help_cmd(message: types.Message):
 @dp.message(lambda m: m.text == "➕ Додати товар")
 async def add_product_prompt(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
+    if not has_access(user_id):
+        await message.answer(NO_ACCESS_TEXT)
+        return
     await clear_last_inline_button(user_id)
     # Онлайн-список не прибираємо — лишається; стікер не чіпаємо
     await state.set_state(AddByText.waiting_for_name)
@@ -175,6 +185,9 @@ _MENU_TEXTS = ("📋 Поточний список", "✅ Список вико�
 @dp.message(AddByText.waiting_for_name, lambda m: m.text and m.text.strip() in _MENU_TEXTS)
 async def menu_while_adding(message: types.Message, state: FSMContext):
     await state.clear()
+    if not has_access(message.from_user.id):
+        await message.answer(NO_ACCESS_TEXT)
+        return
     await clear_last_inline_button(message.from_user.id)
     if message.text == "📋 Поточний список":
         await show_list(message)
@@ -189,29 +202,34 @@ async def add_product_by_text(message: types.Message, state: FSMContext):
     product = (message.text or "").strip().lower()
     if not product:
         return
-    reload_data()
-    if product_in_list(product):
-        await clear_last_inline_button(message.from_user.id)
+    user_id = message.from_user.id
+    if not has_access(user_id):
+        await message.answer(NO_ACCESS_TEXT)
+        return
+    family_id = get_family_id(user_id)
+    shopping_list, all_products, checked = load_data(family_id)
+    if product_in_list(product, shopping_list):
+        await clear_last_inline_button(user_id)
         sent = await message.answer(
             "ℹ️ Цей товар вже є в списку. Якщо хочеш продовжити — натисни кнопку знизу.",
             reply_markup=inline_insert_keyboard(),
         )
-        _last_inline_button_msg[message.from_user.id] = (sent.chat.id, sent.message_id)
+        _last_inline_button_msg[user_id] = (sent.chat.id, sent.message_id)
         return
     shopping_list.append(product)
     all_products.add(product)
     try:
-        save_data(shopping_list, all_products, checked)
+        save_data(family_id, shopping_list, all_products, checked)
     except Exception as e:
         logger.exception("Помилка збереження: %s", e)
         await message.answer("❌ Помилка збереження. Спробуй ще раз.", reply_markup=inline_insert_keyboard())
         return
-    await clear_last_inline_button(message.from_user.id)
+    await clear_last_inline_button(user_id)
     sent = await message.answer(
         f"✅ Товар «{product}» додано до списку. Якщо хочеш продовжити — натисни кнопку знизу.",
         reply_markup=inline_insert_keyboard(),
     )
-    _last_inline_button_msg[message.from_user.id] = (sent.chat.id, sent.message_id)
+    _last_inline_button_msg[user_id] = (sent.chat.id, sent.message_id)
 
 
 # ---------- Inline Mode ----------
@@ -223,7 +241,12 @@ def _safe_id(s: str, max_len: int = 60) -> str:
 
 @dp.inline_query()
 async def inline_search(inline_query: types.InlineQuery):
-    reload_data()
+    user_id = inline_query.from_user.id
+    if not has_access(user_id):
+        await inline_query.answer([], cache_time=1)
+        return
+    family_id = get_family_id(user_id)
+    _, all_products, _ = load_data(family_id)
     q = (inline_query.query or "").strip().lower()
     results = []
 
@@ -260,7 +283,15 @@ async def inline_search(inline_query: types.InlineQuery):
 
 @dp.chosen_inline_result()
 async def chosen_inline(chosen: types.ChosenInlineResult):
-    reload_data()
+    user_id = chosen.from_user.id
+    if not has_access(user_id):
+        try:
+            await bot.send_message(chat_id=user_id, text=NO_ACCESS_TEXT)
+        except Exception:
+            pass
+        return
+    family_id = get_family_id(user_id)
+    shopping_list, all_products, checked = load_data(family_id)
     rid = chosen.result_id
     query = (chosen.query or "").strip().lower()
 
@@ -281,8 +312,7 @@ async def chosen_inline(chosen: types.ChosenInlineResult):
     else:
         return
 
-    user_id = chosen.from_user.id
-    if product_in_list(product):
+    if product_in_list(product, shopping_list):
         try:
             sent = await bot.send_message(
                 chat_id=user_id,
@@ -296,11 +326,11 @@ async def chosen_inline(chosen: types.ChosenInlineResult):
 
     shopping_list.append(product)
     try:
-        save_data(shopping_list, all_products, checked)
+        save_data(family_id, shopping_list, all_products, checked)
     except Exception as e:
         logger.exception("Помилка збереження: %s", e)
         return
-    logger.info("Додано товар: %s (всього в списку: %s)", product, len(shopping_list))
+    logger.info("Додано товар: %s (сім'я %s, всього в списку: %s)", product, family_id, len(shopping_list))
 
     try:
         sent = await bot.send_message(
@@ -315,29 +345,33 @@ async def chosen_inline(chosen: types.ChosenInlineResult):
 
 @dp.message(lambda m: m.text == "📋 Поточний список")
 async def show_list(message: types.Message):
+    if not has_access(message.from_user.id):
+        await message.answer(NO_ACCESS_TEXT)
+        return
     await clear_last_inline_button(message.from_user.id)
     await clear_last_list_message(message.chat.id)
-    reload_data()
+    family_id = get_family_id(message.from_user.id)
+    shopping_list, all_products, checked = load_data(family_id)
     if not shopping_list:
         await message.answer("🛒 Список порожній")
         return
-    text, keyboard = _build_list_message()
+    text, keyboard = _build_list_message(shopping_list, checked)
     sent = await message.answer(text, reply_markup=keyboard)
     _last_list_message[message.chat.id] = sent.message_id
 
 
-def _sorted_list():
+def _sorted_list(shopping_list: list, checked: set):
     """Список товарів: спочатку без галочки, потім з галочкою."""
     unchecked = [p for p in shopping_list if p not in checked]
     checked_items = [p for p in shopping_list if p in checked]
     return unchecked + checked_items
 
 
-def _build_list_message():
+def _build_list_message(shopping_list: list, checked: set):
     """Повертає (мінімальний текст, інлайн-клавіатура — лише кнопки)."""
     rows = []
     prefix = "tick:"
-    for p in _sorted_list():
+    for p in _sorted_list(shopping_list, checked):
         is_checked = p in checked
         sym = "☑" if is_checked else "☐"
         cb = prefix + truncate_for_callback(p, prefix)
@@ -349,8 +383,11 @@ def _build_list_message():
 @dp.callback_query(lambda c: c.data.startswith("tick:"))
 async def toggle_tick(callback: types.CallbackQuery):
     """Поставлена галочка = товар прибирається зі списку (онлайн). Знята галочка = лишається в списку."""
-    global shopping_list, checked
-    reload_data()
+    if not has_access(callback.from_user.id):
+        await callback.answer(NO_ACCESS_TEXT, show_alert=True)
+        return
+    family_id = get_family_id(callback.from_user.id)
+    shopping_list, all_products, checked = load_data(family_id)
     product = callback.data.split(":", 1)[1]
     match = next((p for p in shopping_list if p == product or truncate_for_callback(p, "tick:") == product), None)
     if match is None:
@@ -363,7 +400,7 @@ async def toggle_tick(callback: types.CallbackQuery):
         shopping_list.remove(match)
         checked.discard(match)
     try:
-        save_data(shopping_list, all_products, checked)
+        save_data(family_id, shopping_list, all_products, checked)
     except Exception as e:
         logger.exception("Помилка збереження: %s", e)
         await callback.answer("Помилка")
@@ -372,7 +409,7 @@ async def toggle_tick(callback: types.CallbackQuery):
         await callback.message.edit_text("🛒 Список порожній", reply_markup=InlineKeyboardMarkup(inline_keyboard=[]))
         await callback.answer()
         return
-    text, keyboard = _build_list_message()
+    text, keyboard = _build_list_message(shopping_list, checked)
     await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
 
@@ -380,9 +417,13 @@ async def toggle_tick(callback: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "export_list")
 async def export_list_file(callback: types.CallbackQuery):
     """Відправляє HTML з реальними чекбоксами — на iPhone відкрий у Safari, галочки натискаються."""
-    reload_data()
+    if not has_access(callback.from_user.id):
+        await callback.answer(NO_ACCESS_TEXT, show_alert=True)
+        return
+    family_id = get_family_id(callback.from_user.id)
+    shopping_list, all_products, checked = load_data(family_id)
     items = []
-    for p in _sorted_list():
+    for p in _sorted_list(shopping_list, checked):
         safe = html.escape(p)
         if p in checked:
             items.append(f'<label class="item"><input type="checkbox" checked> {safe}</label>')
@@ -418,20 +459,23 @@ h1 { font-size: 1.2rem; }
 
 @dp.message(lambda m: m.text == "✅ Список виконано")
 async def clear_list(message: types.Message):
-    global checked
+    if not has_access(message.from_user.id):
+        await message.answer(NO_ACCESS_TEXT)
+        return
+    family_id = get_family_id(message.from_user.id)
     await clear_last_inline_button(message.from_user.id)
     await clear_last_list_message(message.chat.id)
     await clear_last_export_message(message.chat.id)
-    reload_data()
+    shopping_list, all_products, checked = load_data(family_id)
     shopping_list.clear()
     checked.clear()
-    save_data(shopping_list, all_products, checked)
+    save_data(family_id, shopping_list, all_products, checked)
     await message.answer("🎉 Список очищено!")
 
 
 # ---------- Start ----------
 async def main():
-    global BOT_USERNAME, shopping_list, all_products
+    global BOT_USERNAME
     me = await bot.get_me()
     BOT_USERNAME = me.username or "bot"
     logger.info("Бот запущено: @%s", BOT_USERNAME)
